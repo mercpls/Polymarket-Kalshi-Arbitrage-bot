@@ -177,12 +177,20 @@ pub async fn get_config(
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080u16);
     
+    let cred_status = &state.credential_status;
+    
     Json(ConfigResponse {
         dry_run,
         arb_threshold: ARB_THRESHOLD,
         enabled_leagues: ENABLED_LEAGUES.iter().map(|s| s.to_string()).collect(),
         market_count: state.global_state.market_count(),
         web_port,
+        credentials: CredentialStatusResponse {
+            kalshi_configured: cred_status.kalshi_configured,
+            kalshi_error: cred_status.kalshi_error.clone(),
+            polymarket_configured: cred_status.polymarket_configured,
+            polymarket_error: cred_status.polymarket_error.clone(),
+        },
     })
 }
 

@@ -153,26 +153,48 @@ impl KalshiOrderDetails {
 
 // === Kalshi Auth Config ===
 
+#[derive(Clone)]
 pub struct KalshiConfig {
     pub api_key_id: String,
     pub private_key: RsaPrivateKey,
 }
 
 impl KalshiConfig {
-    pub fn from_env() -> Result<Self> {
+    /// Try to load Kalshi credentials from environment.
+    /// Returns Ok(Some(config)) if credentials are valid,
+    /// Ok(None) with warning message if credentials are missing/invalid.
+    pub fn try_from_env() -> (Option<Self>, Option<String>) {
         dotenvy::dotenv().ok();
-        let api_key_id = std::env::var("KALSHI_API_KEY_ID").context("KALSHI_API_KEY_ID not set")?;
+        
+        let api_key_id = match std::env::var("KALSHI_API_KEY_ID") {
+            Ok(key) if !key.is_empty() => key,
+            _ => return (None, Some("KALSHI_API_KEY_ID not set".to_string())),
+        };
+        
         // Support both KALSHI_PRIVATE_KEY_PATH and KALSHI_PRIVATE_KEY_FILE for compatibility
         let key_path = std::env::var("KALSHI_PRIVATE_KEY_PATH")
             .or_else(|_| std::env::var("KALSHI_PRIVATE_KEY_FILE"))
             .unwrap_or_else(|_| "kalshi_private_key.txt".to_string());
-        let private_key_pem = std::fs::read_to_string(&key_path)
-            .with_context(|| format!("Failed to read private key from {}", key_path))?
-            .trim()
-            .to_owned();
-        let private_key = RsaPrivateKey::from_pkcs1_pem(&private_key_pem)
-            .context("Failed to parse private key PEM")?;
-        Ok(Self { api_key_id, private_key })
+        
+        let private_key_pem = match std::fs::read_to_string(&key_path) {
+            Ok(pem) => pem.trim().to_owned(),
+            Err(e) => return (None, Some(format!("Failed to read private key from {}: {}", key_path, e))),
+        };
+        
+        let private_key = match RsaPrivateKey::from_pkcs1_pem(&private_key_pem) {
+            Ok(key) => key,
+            Err(e) => return (None, Some(format!("Failed to parse private key PEM: {}", e))),
+        };
+        
+        (Some(Self { api_key_id, private_key }), None)
+    }
+    
+    pub fn from_env() -> Result<Self> {
+        let (config, error) = Self::try_from_env();
+        match config {
+            Some(c) => Ok(c),
+            None => Err(anyhow::anyhow!(error.unwrap_or_else(|| "Unknown error loading Kalshi credentials".to_string()))),
+        }
     }
 
     pub fn sign(&self, message: &str) -> Result<String> {

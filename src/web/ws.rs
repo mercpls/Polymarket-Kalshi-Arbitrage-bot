@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use super::types::*;
 use super::WebState;

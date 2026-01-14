@@ -34,7 +34,7 @@ mod position_tracker;
 mod types;
 mod web;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -47,7 +47,7 @@ use execution::{ExecutionEngine, create_execution_channel, run_execution_loop};
 use kalshi::{KalshiConfig, KalshiApiClient};
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
 use position_tracker::{PositionTracker, create_position_channel, position_writer_loop};
-use types::{GlobalState, PriceCents};
+use types::{GlobalState, PriceCents, CredentialStatus};
 
 /// Polymarket CLOB API host
 const POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
@@ -77,95 +77,154 @@ async fn main() -> Result<()> {
         warn!("   Mode: LIVE EXECUTION");
     }
 
-    // Load Kalshi credentials
-    let kalshi_config = KalshiConfig::from_env()?;
-    info!("[KALSHI] API key loaded");
-
-    // Load Polymarket credentials
-    dotenvy::dotenv().ok();
-    let poly_private_key = std::env::var("POLY_PRIVATE_KEY")
-        .context("POLY_PRIVATE_KEY not set")?;
-    let poly_funder = std::env::var("POLY_FUNDER")
-        .context("POLY_FUNDER not set (your wallet address)")?;
-
-    // Create async Polymarket client and derive API credentials
-    info!("[POLYMARKET] Creating async client and deriving API credentials...");
-    let poly_async_client = PolymarketAsyncClient::new(
-        POLY_CLOB_HOST,
-        POLYGON_CHAIN_ID,
-        &poly_private_key,
-        &poly_funder,
-    )?;
-    let api_creds = poly_async_client.derive_api_key(0).await?;
-    let prepared_creds = PreparedCreds::from_api_creds(&api_creds)?;
-    let poly_async = Arc::new(SharedAsyncClient::new(poly_async_client, prepared_creds, POLYGON_CHAIN_ID));
-
-    // Load neg_risk cache from Python script output
-    match poly_async.load_cache(".clob_market_cache.json") {
-        Ok(count) => info!("[POLYMARKET] Loaded {} neg_risk entries from cache", count),
-        Err(e) => warn!("[POLYMARKET] Could not load neg_risk cache: {}", e),
+    // Track credential status
+    let mut cred_status = CredentialStatus::new();
+    
+    // Try to load Kalshi credentials (non-fatal if missing)
+    let (kalshi_config, kalshi_error) = KalshiConfig::try_from_env();
+    if let Some(ref config) = kalshi_config {
+        cred_status.kalshi_configured = true;
+        info!("[KALSHI] API key loaded: {}", &config.api_key_id[..8.min(config.api_key_id.len())]);
+    } else {
+        cred_status.kalshi_error = kalshi_error.clone();
+        warn!("[KALSHI] ⚠️  Credentials not configured: {}", kalshi_error.as_deref().unwrap_or("Unknown error"));
+        warn!("[KALSHI]    Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH environment variables");
     }
 
-    info!("[POLYMARKET] Client ready for {}", &poly_funder[..10]);
+    // Try to load Polymarket credentials (non-fatal if missing)
+    dotenvy::dotenv().ok();
+    let poly_private_key = std::env::var("POLY_PRIVATE_KEY").ok();
+    let poly_funder = std::env::var("POLY_FUNDER").ok();
+    
+    let poly_async: Option<Arc<SharedAsyncClient>> = match (&poly_private_key, &poly_funder) {
+        (Some(private_key), Some(funder)) if !private_key.is_empty() && !funder.is_empty() => {
+            info!("[POLYMARKET] Creating async client and deriving API credentials...");
+            match PolymarketAsyncClient::new(
+                POLY_CLOB_HOST,
+                POLYGON_CHAIN_ID,
+                private_key,
+                funder,
+            ) {
+                Ok(client) => {
+                    match client.derive_api_key(0).await {
+                        Ok(api_creds) => {
+                            match PreparedCreds::from_api_creds(&api_creds) {
+                                Ok(prepared_creds) => {
+                                    let shared = Arc::new(SharedAsyncClient::new(client, prepared_creds, POLYGON_CHAIN_ID));
+                                    
+                                    // Load neg_risk cache from Python script output
+                                    match shared.load_cache(".clob_market_cache.json") {
+                                        Ok(count) => info!("[POLYMARKET] Loaded {} neg_risk entries from cache", count),
+                                        Err(e) => warn!("[POLYMARKET] Could not load neg_risk cache: {}", e),
+                                    }
+                                    
+                                    cred_status.polymarket_configured = true;
+                                    info!("[POLYMARKET] Client ready for {}...", &funder[..10.min(funder.len())]);
+                                    Some(shared)
+                                }
+                                Err(e) => {
+                                    let err_msg = format!("Failed to prepare credentials: {}", e);
+                                    cred_status.polymarket_error = Some(err_msg.clone());
+                                    warn!("[POLYMARKET] ⚠️  {}", err_msg);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Failed to derive API key: {}", e);
+                            cred_status.polymarket_error = Some(err_msg.clone());
+                            warn!("[POLYMARKET] ⚠️  {}", err_msg);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("Failed to create client: {}", e);
+                    cred_status.polymarket_error = Some(err_msg.clone());
+                    warn!("[POLYMARKET] ⚠️  {}", err_msg);
+                    None
+                }
+            }
+        }
+        _ => {
+            cred_status.polymarket_error = Some("POLY_PRIVATE_KEY or POLY_FUNDER not set".to_string());
+            warn!("[POLYMARKET] ⚠️  Credentials not configured");
+            warn!("[POLYMARKET]    Set POLY_PRIVATE_KEY and POLY_FUNDER environment variables");
+            None
+        }
+    };
+
+    // Log credential status summary
+    info!("🔑 Credential status: {}", cred_status.summary());
+    
+    // Store credential status for web API
+    let cred_status = Arc::new(cred_status);
 
     // Load team code mapping cache
     let team_cache = TeamCache::load();
     info!("📂 Loaded {} team code mappings", team_cache.len());
 
-    // Create Kalshi API client
-    let kalshi_api = Arc::new(KalshiApiClient::new(kalshi_config));
+    // Build global state from discovery results
+    let mut global_state = GlobalState::new();
 
-    // Run discovery (with caching support)
-    let force_discovery = std::env::var("FORCE_DISCOVERY")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    // Only run discovery if Kalshi credentials are available
+    let kalshi_api: Option<Arc<KalshiApiClient>> = if let Some(ref config) = kalshi_config {
+        let api = Arc::new(KalshiApiClient::new(config.clone()));
+        
+        // Run discovery (with caching support)
+        let force_discovery = std::env::var("FORCE_DISCOVERY")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
 
-    info!("🔍 Market discovery{}...",
-          if force_discovery { " (forced refresh)" } else { "" });
+        info!("🔍 Market discovery{}...",
+              if force_discovery { " (forced refresh)" } else { "" });
 
-    let discovery = DiscoveryClient::new(
-        KalshiApiClient::new(KalshiConfig::from_env()?),
-        team_cache
-    );
+        let discovery = DiscoveryClient::new(
+            KalshiApiClient::new(config.clone()),
+            team_cache
+        );
 
-    let result = if force_discovery {
-        discovery.discover_all_force(ENABLED_LEAGUES).await
+        let result = if force_discovery {
+            discovery.discover_all_force(ENABLED_LEAGUES).await
+        } else {
+            discovery.discover_all(ENABLED_LEAGUES).await
+        };
+
+        info!("📊 Market discovery complete:");
+        info!("   - Matched market pairs: {}", result.pairs.len());
+
+        if !result.errors.is_empty() {
+            for err in &result.errors {
+                warn!("   ⚠️ {}", err);
+            }
+        }
+
+        if result.pairs.is_empty() {
+            warn!("⚠️  No market pairs found - check credentials or wait for markets to open");
+        } else {
+            // Display discovered market pairs
+            info!("📋 Discovered market pairs:");
+            for pair in &result.pairs {
+                info!("   ✅ {} | {} | Kalshi: {}",
+                      pair.description,
+                      pair.market_type,
+                      pair.kalshi_market_ticker);
+            }
+            
+            // Add pairs to state
+            for pair in result.pairs {
+                global_state.add_pair(pair);
+            }
+        }
+        
+        Some(api)
     } else {
-        discovery.discover_all(ENABLED_LEAGUES).await
+        warn!("⚠️  Skipping market discovery - Kalshi credentials not configured");
+        None
     };
-
-    info!("📊 Market discovery complete:");
-    info!("   - Matched market pairs: {}", result.pairs.len());
-
-    if !result.errors.is_empty() {
-        for err in &result.errors {
-            warn!("   ⚠️ {}", err);
-        }
-    }
-
-    if result.pairs.is_empty() {
-        error!("No market pairs found!");
-        return Ok(());
-    }
-
-    // Display discovered market pairs
-    info!("📋 Discovered market pairs:");
-    for pair in &result.pairs {
-        info!("   ✅ {} | {} | Kalshi: {}",
-              pair.description,
-              pair.market_type,
-              pair.kalshi_market_ticker);
-    }
-
-    // Build global state
-    let state = Arc::new({
-        let mut s = GlobalState::new();
-        for pair in result.pairs {
-            s.add_pair(pair);
-        }
-        info!("📡 Global state initialized: tracking {} markets", s.market_count());
-        s
-    });
+    
+    info!("📡 Global state initialized: tracking {} markets", global_state.market_count());
+    let state = Arc::new(global_state);
 
     // Initialize execution infrastructure
     let (exec_tx, exec_rx) = create_execution_channel();
@@ -174,28 +233,40 @@ async fn main() -> Result<()> {
     let position_tracker = Arc::new(RwLock::new(PositionTracker::new()));
     let (position_channel, position_rx) = create_position_channel();
 
-    tokio::spawn(position_writer_loop(position_rx, position_tracker));
+    tokio::spawn(position_writer_loop(position_rx, position_tracker.clone()));
 
     let threshold_cents: PriceCents = ((ARB_THRESHOLD * 100.0).round() as u16).max(1);
     info!("   Execution threshold: {} cents", threshold_cents);
 
-    let engine = Arc::new(ExecutionEngine::new(
-        kalshi_api.clone(),
-        poly_async,
-        state.clone(),
-        circuit_breaker.clone(),
-        position_channel,
-        dry_run,
-    ));
+    // Only create execution engine if we have at least one platform's credentials
+    if let (Some(ref kalshi), Some(ref poly)) = (&kalshi_api, &poly_async) {
+        let engine = Arc::new(ExecutionEngine::new(
+            kalshi.clone(),
+            poly.clone(),
+            state.clone(),
+            circuit_breaker.clone(),
+            position_channel,
+            dry_run,
+        ));
+        tokio::spawn(run_execution_loop(exec_rx, engine));
+    } else {
+        warn!("⚠️  Execution engine not started - missing platform credentials");
+        // Still need to consume exec_rx to avoid memory buildup
+        tokio::spawn(async move {
+            let mut rx = exec_rx;
+            while rx.recv().await.is_some() {
+                // Discard execution requests when no engine is available
+            }
+        });
+    }
 
-    let exec_handle = tokio::spawn(run_execution_loop(exec_rx, engine));
-
-    // Start web dashboard server
+    // Start web dashboard server (always starts, regardless of credentials)
     let web_state = state.clone();
     let web_cb = circuit_breaker.clone();
     let web_tracker = position_tracker.clone();
+    let web_cred_status = cred_status.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::start_server(web_state, web_cb, web_tracker).await {
+        if let Err(e) = web::start_server(web_state, web_cb, web_tracker, web_cred_status).await {
             error!("[WEB] Server failed: {}", e);
         }
     });
@@ -270,32 +341,42 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Initialize Kalshi WebSocket connection (config reused on reconnects)
-    let kalshi_state = state.clone();
-    let kalshi_exec_tx = exec_tx.clone();
-    let kalshi_threshold = threshold_cents;
-    let kalshi_ws_config = KalshiConfig::from_env()?;
-    let kalshi_handle = tokio::spawn(async move {
-        loop {
-            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold).await {
-                error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
+    // Initialize Kalshi WebSocket connection (only if credentials available)
+    let kalshi_handle = if let Some(ref config) = kalshi_config {
+        let kalshi_state = state.clone();
+        let kalshi_exec_tx = exec_tx.clone();
+        let kalshi_threshold = threshold_cents;
+        let kalshi_ws_config = config.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold).await {
+                    error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
-        }
-    });
+        }))
+    } else {
+        info!("[KALSHI] WebSocket not started - credentials not configured");
+        None
+    };
 
-    // Initialize Polymarket WebSocket connection
-    let poly_state = state.clone();
-    let poly_exec_tx = exec_tx.clone();
-    let poly_threshold = threshold_cents;
-    let poly_handle = tokio::spawn(async move {
-        loop {
-            if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold).await {
-                error!("[POLYMARKET] WebSocket disconnected: {} - reconnecting...", e);
+    // Initialize Polymarket WebSocket connection (always starts if we have markets, doesn't need auth)
+    let poly_handle = if state.market_count() > 0 {
+        let poly_state = state.clone();
+        let poly_exec_tx = exec_tx.clone();
+        let poly_threshold = threshold_cents;
+        Some(tokio::spawn(async move {
+            loop {
+                if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold).await {
+                    error!("[POLYMARKET] WebSocket disconnected: {} - reconnecting...", e);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
-        }
-    });
+        }))
+    } else {
+        info!("[POLYMARKET] WebSocket not started - no markets to monitor");
+        None
+    };
 
     // System health monitoring and arbitrage diagnostics
     let heartbeat_state = state.clone();
@@ -369,7 +450,26 @@ async fn main() -> Result<()> {
 
     // Main event loop - run until termination
     info!("✅ All systems operational - entering main event loop");
-    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, exec_handle);
+    
+    // Wait on all available handles
+    let heartbeat_future = heartbeat_handle;
+    
+    match (kalshi_handle, poly_handle) {
+        (Some(k), Some(p)) => {
+            let _ = tokio::join!(k, p, heartbeat_future);
+        }
+        (Some(k), None) => {
+            let _ = tokio::join!(k, heartbeat_future);
+        }
+        (None, Some(p)) => {
+            let _ = tokio::join!(p, heartbeat_future);
+        }
+        (None, None) => {
+            // No WebSocket connections, just run heartbeat
+            info!("⚠️  Running in dashboard-only mode (no WebSocket connections)");
+            let _ = heartbeat_future.await;
+        }
+    }
 
     Ok(())
 }

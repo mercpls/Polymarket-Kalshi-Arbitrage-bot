@@ -1,10 +1,8 @@
 //! API response types for the web dashboard.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-use crate::position_tracker::{ArbPosition, PositionLeg, PositionSummary};
-use crate::types::MarketType;
+use crate::position_tracker::{ArbPosition, PositionLeg};
 
 /// Health check response
 #[derive(Debug, Serialize)]
@@ -16,7 +14,7 @@ pub struct HealthResponse {
 }
 
 /// Position with computed fields for the API
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionResponse {
     pub market_id: String,
     pub description: String,
@@ -35,7 +33,7 @@ pub struct PositionResponse {
 }
 
 /// Position leg response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegResponse {
     pub contracts: f64,
     pub cost_basis: f64,
@@ -74,7 +72,7 @@ impl From<&ArbPosition> for PositionResponse {
 }
 
 /// Position summary response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummaryResponse {
     pub total_cost_basis: f64,
     pub total_guaranteed_profit: f64,
@@ -136,6 +134,16 @@ pub struct ConfigResponse {
     pub enabled_leagues: Vec<String>,
     pub market_count: usize,
     pub web_port: u16,
+    pub credentials: CredentialStatusResponse,
+}
+
+/// Credential status response
+#[derive(Debug, Serialize)]
+pub struct CredentialStatusResponse {
+    pub kalshi_configured: bool,
+    pub kalshi_error: Option<String>,
+    pub polymarket_configured: bool,
+    pub polymarket_error: Option<String>,
 }
 
 /// Market list response
@@ -146,7 +154,7 @@ pub struct MarketsListResponse {
 }
 
 /// Positions list response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionsListResponse {
     pub positions: Vec<PositionResponse>,
     pub total: usize,

@@ -21,9 +21,8 @@ use tracing::{info, error};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::position_tracker::PositionTracker;
-use crate::types::GlobalState;
+use crate::types::{GlobalState, CredentialStatus};
 
-pub use types::*;
 pub use ws::WebSocketUpdate;
 
 /// Shared state for web handlers
@@ -33,6 +32,7 @@ pub struct WebState {
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub position_tracker: Arc<RwLock<PositionTracker>>,
     pub update_tx: broadcast::Sender<WebSocketUpdate>,
+    pub credential_status: Arc<CredentialStatus>,
 }
 
 /// Configuration for the web server
@@ -58,6 +58,7 @@ pub async fn start_server(
     global_state: Arc<GlobalState>,
     circuit_breaker: Arc<CircuitBreaker>,
     position_tracker: Arc<RwLock<PositionTracker>>,
+    credential_status: Arc<CredentialStatus>,
 ) -> Result<()> {
     let config = WebConfig::default();
     
@@ -69,6 +70,7 @@ pub async fn start_server(
         circuit_breaker,
         position_tracker: position_tracker.clone(),
         update_tx: update_tx.clone(),
+        credential_status,
     };
     
     // Start file watcher for positions.json

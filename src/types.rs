@@ -1263,3 +1263,57 @@ pub struct DiscoveryResult {
     pub poly_misses: usize,
     pub errors: Vec<String>,
 }
+
+// === Credential Status ===
+
+/// Tracks which platform credentials are available
+#[derive(Debug, Clone, Default)]
+pub struct CredentialStatus {
+    /// Whether Kalshi credentials are configured and valid
+    pub kalshi_configured: bool,
+    /// Error message if Kalshi credentials failed to load
+    pub kalshi_error: Option<String>,
+    /// Whether Polymarket credentials are configured and valid
+    pub polymarket_configured: bool,
+    /// Error message if Polymarket credentials failed to load
+    pub polymarket_error: Option<String>,
+}
+
+impl CredentialStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Check if at least one platform is configured
+    pub fn any_configured(&self) -> bool {
+        self.kalshi_configured || self.polymarket_configured
+    }
+    
+    /// Check if both platforms are configured (required for cross-platform arb)
+    pub fn both_configured(&self) -> bool {
+        self.kalshi_configured && self.polymarket_configured
+    }
+    
+    /// Get a summary of credential status for logging
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        
+        if self.kalshi_configured {
+            parts.push("Kalshi: ✓".to_string());
+        } else if let Some(ref err) = self.kalshi_error {
+            parts.push(format!("Kalshi: ✗ ({})", err));
+        } else {
+            parts.push("Kalshi: ✗ (not configured)".to_string());
+        }
+        
+        if self.polymarket_configured {
+            parts.push("Polymarket: ✓".to_string());
+        } else if let Some(ref err) = self.polymarket_error {
+            parts.push(format!("Polymarket: ✗ ({})", err));
+        } else {
+            parts.push("Polymarket: ✗ (not configured)".to_string());
+        }
+        
+        parts.join(" | ")
+    }
+}

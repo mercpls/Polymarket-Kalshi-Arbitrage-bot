@@ -10,7 +10,7 @@ mod ws;
 use anyhow::Result;
 use axum::{
     Router,
-    routing::get,
+    routing::{get, post},
 };
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -103,7 +103,10 @@ fn build_router(state: WebState, config: &WebConfig) -> Router {
         .route("/markets", get(api::get_markets))
         .route("/markets/:id", get(api::get_market))
         .route("/circuit-breaker", get(api::get_circuit_breaker))
+        .route("/circuit-breaker/reset", post(api::reset_circuit_breaker))
+        .route("/circuit-breaker/halt", post(api::halt_circuit_breaker))
         .route("/config", get(api::get_config))
+        .route("/config", post(api::save_config))
         .with_state(state.clone());
     
     let ws_routes = Router::new()

@@ -17,6 +17,54 @@ function Show-Banner {
     Write-Host "   Polymarket-Kalshi Arbitrage Bot - Setup" -ForegroundColor White
     Write-Host "===================================================" -ForegroundColor Cyan
     Write-Host ""
+    # Pad down 8 lines for progress bar space
+    for ($i = 0; $i -lt 8; $i++) { Write-Host "" }
+}
+
+function Write-BuildOutput {
+    param(
+        [string]$Title,
+        [string]$Output,
+        [string]$Color = "DarkGray"
+    )
+    
+    if ([string]::IsNullOrWhiteSpace($Output)) { return }
+    
+    Write-Host ""
+    Write-Host "  --- $Title ---" -ForegroundColor Cyan
+    
+    $lines = $Output -split "`n"
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        
+        # Color-code different types of output
+        if ($trimmed -match "^Compiling") {
+            Write-Host "    $trimmed" -ForegroundColor Blue
+        }
+        elseif ($trimmed -match "^Downloading|^Downloaded") {
+            Write-Host "    $trimmed" -ForegroundColor DarkGray
+        }
+        elseif ($trimmed -match "^Finished") {
+            Write-Host "    $trimmed" -ForegroundColor Green
+        }
+        elseif ($trimmed -match "^warning:") {
+            Write-Host "    $trimmed" -ForegroundColor Yellow
+        }
+        elseif ($trimmed -match "^error") {
+            Write-Host "    $trimmed" -ForegroundColor Red
+        }
+        elseif ($trimmed -match "added.*packages|up to date") {
+            Write-Host "    $trimmed" -ForegroundColor Green
+        }
+        elseif ($trimmed -match "vite|build|dist|chunks") {
+            Write-Host "    $trimmed" -ForegroundColor Magenta
+        }
+        else {
+            Write-Host "    $trimmed" -ForegroundColor $Color
+        }
+    }
+    Write-Host ""
 }
 
 function Invoke-Step {
@@ -24,20 +72,24 @@ function Invoke-Step {
         [string]$Name,
         [scriptblock]$Action,
         [int]$Step,
-        [int]$TotalSteps
+        [int]$TotalSteps,
+        [switch]$ShowOutput
     )
     
     $percent = ($Step / $TotalSteps) * 100
     Write-Progress -Activity "Setup in progress" -Status "Step $Step of ${TotalSteps}: $Name" -PercentComplete $percent
     
-    Write-Host "[$Step/$TotalSteps] $Name..." -ForegroundColor Yellow -NoNewline
+    Write-Host "[$Step/$TotalSteps] $Name..." -ForegroundColor Yellow
     
     try {
-        & $Action
-        Write-Host " Done" -ForegroundColor Green
+        $result = & $Action
+        if ($ShowOutput -and $result) {
+            Write-BuildOutput -Title $Name -Output $result
+        }
+        Write-Host "[$Step/$TotalSteps] $Name... Done" -ForegroundColor Green
     }
     catch {
-        Write-Host " Failed" -ForegroundColor Red
+        Write-Host "[$Step/$TotalSteps] $Name... Failed" -ForegroundColor Red
         Write-Host "Error: $_" -ForegroundColor Red
         exit 1
     }
@@ -67,29 +119,31 @@ Write-Host ""
 $TotalSteps = 4
 
 # 2. Install Frontend Dependencies
-Invoke-Step -Name "Installing Frontend Dependencies" -Step 1 -TotalSteps $TotalSteps -Action {
+Invoke-Step -Name "Installing Frontend Dependencies" -Step 1 -TotalSteps $TotalSteps -ShowOutput -Action {
     Push-Location "dashboard"
-    # Capture output to avoid clutter, only show on error
-    $output = npm install 2>&1
-    if ($LASTEXITCODE -ne 0) { throw $output }
+    $output = npm install 2>&1 | Out-String
     Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw $output }
+    return $output
 }
 
 # 3. Build Frontend
-Invoke-Step -Name "Building Frontend" -Step 2 -TotalSteps $TotalSteps -Action {
+Invoke-Step -Name "Building Frontend" -Step 2 -TotalSteps $TotalSteps -ShowOutput -Action {
     Push-Location "dashboard"
-    $output = npm run build 2>&1
-    if ($LASTEXITCODE -ne 0) { throw $output }
+    $output = npm run build 2>&1 | Out-String
     Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw $output }
+    return $output
 }
 
 # 4. Build Backend
-Invoke-Step -Name "Building Rust Backend" -Step 3 -TotalSteps $TotalSteps -Action {
+Invoke-Step -Name "Building Rust Backend" -Step 3 -TotalSteps $TotalSteps -ShowOutput -Action {
     $ErrorActionPreference = "Continue"
     $output = cargo build --release 2>&1 | Out-String
     $ErrorActionPreference = "Stop"
     # Check for "Finished" in output since warnings on stderr cause false exit codes
     if ($output -notmatch "Finished.*release") { throw $output }
+    return $output
 }
 
 # 5. Launch

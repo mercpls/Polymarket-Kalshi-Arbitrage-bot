@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::position_tracker::{ArbPosition, PositionLeg};
 
 /// Health check response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -86,7 +86,7 @@ pub struct SummaryResponse {
 }
 
 /// Market data response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketResponse {
     pub market_id: u16,
     pub pair_id: String,
@@ -104,7 +104,7 @@ pub struct MarketResponse {
 }
 
 /// Circuit breaker status response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerResponse {
     pub is_trading_allowed: bool,
     pub is_tripped: bool,
@@ -116,7 +116,7 @@ pub struct CircuitBreakerResponse {
 }
 
 /// Circuit breaker config response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfigResponse {
     pub enabled: bool,
     pub max_position_per_market: i64,
@@ -127,7 +127,7 @@ pub struct CircuitBreakerConfigResponse {
 }
 
 /// Bot configuration response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigResponse {
     pub dry_run: bool,
     pub arb_threshold: f64,
@@ -138,7 +138,7 @@ pub struct ConfigResponse {
 }
 
 /// Credential status response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialStatusResponse {
     pub kalshi_configured: bool,
     pub kalshi_error: Option<String>,
@@ -147,7 +147,7 @@ pub struct CredentialStatusResponse {
 }
 
 /// Market list response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketsListResponse {
     pub markets: Vec<MarketResponse>,
     pub total: usize,
@@ -158,4 +158,19 @@ pub struct MarketsListResponse {
 pub struct PositionsListResponse {
     pub positions: Vec<PositionResponse>,
     pub total: usize,
+}
+
+/// Config save request from dashboard
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveConfigRequest {
+    pub dry_run: bool,
+    pub arb_threshold: f64,
+    pub enabled_leagues: Vec<String>,
+    pub price_logging: bool,
+    pub max_position_per_market: i64,
+    pub max_total_position: i64,
+    pub max_daily_loss: f64,
+    pub max_consecutive_errors: u32,
+    pub cooldown_secs: u64,
+    pub circuit_breaker_enabled: bool,
 }

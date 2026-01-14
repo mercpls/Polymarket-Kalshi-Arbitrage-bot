@@ -18,6 +18,10 @@
 //! - **Real-time price monitoring** via WebSocket connections to both platforms
 //! - **Lock-free orderbook cache** using atomic operations for zero-copy updates
 //! - **SIMD-accelerated arbitrage detection** for sub-millisecond latency
+
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
 //! - **Concurrent order execution** with automatic position reconciliation
 //! - **Circuit breaker protection** with configurable risk limits
 //! - **Market discovery system** with intelligent caching and incremental updates

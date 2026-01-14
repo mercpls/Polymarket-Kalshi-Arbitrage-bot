@@ -14,14 +14,22 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn};
+use tokio::sync::{broadcast, RwLock, mpsc};
+use tracing::{info, warn, debug};
 
 use super::types::*;
 use super::WebState;
+use crate::config::{ARB_THRESHOLD, ENABLED_LEAGUES};
 use crate::position_tracker::PositionTracker;
 
-/// WebSocket update message types
+// Track server start time for uptime calculation
+static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn get_start_time() -> &'static std::time::Instant {
+    START_TIME.get_or_init(std::time::Instant::now)
+}
+
+/// WebSocket update message types (server -> client)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WebSocketUpdate {
@@ -49,6 +57,38 @@ pub enum WebSocketUpdate {
         timestamp: String,
         market_count: usize,
     },
+    /// Response to ping
+    Pong {
+        timestamp: String,
+    },
+    /// Health data
+    Health(HealthResponse),
+    /// Config data
+    Config(ConfigResponse),
+    /// Circuit breaker data
+    CircuitBreaker(CircuitBreakerResponse),
+    /// Markets list
+    Markets(MarketsListResponse),
+}
+
+/// WebSocket request message types (client -> server)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WebSocketRequest {
+    /// Ping request
+    Ping,
+    /// Request health data
+    GetHealth,
+    /// Request positions
+    GetPositions,
+    /// Request summary
+    GetSummary,
+    /// Request markets
+    GetMarkets,
+    /// Request config
+    GetConfig,
+    /// Request circuit breaker status
+    GetCircuitBreaker,
 }
 
 /// WebSocket upgrade handler
@@ -63,7 +103,10 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: WebState) {
     let (mut sender, mut receiver) = socket.split();
     
-    // Subscribe to updates
+    // Create channel for sending responses from request handler
+    let (response_tx, mut response_rx) = mpsc::channel::<WebSocketUpdate>(32);
+    
+    // Subscribe to broadcast updates
     let mut update_rx = state.update_tx.subscribe();
     
     // Send initial state
@@ -99,45 +142,102 @@ async fn handle_socket(socket: WebSocket, state: WebState) {
         if let Ok(json) = serde_json::to_string(&summary_update) {
             let _ = sender.send(Message::Text(json)).await;
         }
+        
+        // Send initial health
+        let health = build_health_response(&state);
+        if let Ok(json) = serde_json::to_string(&WebSocketUpdate::Health(health)) {
+            let _ = sender.send(Message::Text(json)).await;
+        }
     }
     
-    // Heartbeat task
+    // Heartbeat task - sends updates every second
     let heartbeat_state = state.clone();
+    let heartbeat_tracker = state.position_tracker.clone();
     let heartbeat_tx = state.update_tx.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_millis(1000));
         loop {
             interval.tick().await;
+            
+            // Send heartbeat with timestamp
             let update = WebSocketUpdate::Heartbeat {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 market_count: heartbeat_state.global_state.market_count(),
             };
             let _ = heartbeat_tx.send(update);
+            
+            // Send current positions
+            let tracker = heartbeat_tracker.read().await;
+            let positions: Vec<PositionResponse> = tracker
+                .open_positions()
+                .iter()
+                .map(|p| (*p).into())
+                .collect();
+            let total = positions.len();
+            let _ = heartbeat_tx.send(WebSocketUpdate::Positions(PositionsListResponse { positions, total }));
+            
+            // Send summary
+            let summary = tracker.summary();
+            let _ = heartbeat_tx.send(WebSocketUpdate::Summary(SummaryResponse {
+                total_cost_basis: summary.total_cost_basis,
+                total_guaranteed_profit: summary.total_guaranteed_profit,
+                total_unmatched_exposure: summary.total_unmatched_exposure,
+                realized_pnl: summary.realized_pnl,
+                open_positions: summary.open_positions,
+                resolved_positions: summary.resolved_positions,
+                total_contracts: summary.total_contracts,
+                daily_pnl: tracker.daily_pnl(),
+                all_time_pnl: tracker.all_time_pnl,
+            }));
+            
+            // Send health update for uptime
+            let health = build_health_response(&heartbeat_state);
+            let _ = heartbeat_tx.send(WebSocketUpdate::Health(health));
         }
     });
     
-    // Forward updates to this client
+    // Sender task - forwards broadcast updates and direct responses to client
     let send_task = tokio::spawn(async move {
-        while let Ok(update) = update_rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&update) {
-                if sender.send(Message::Text(json)).await.is_err() {
-                    break;
+        loop {
+            tokio::select! {
+                // Handle broadcast updates
+                Ok(update) = update_rx.recv() => {
+                    if let Ok(json) = serde_json::to_string(&update) {
+                        if sender.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Handle direct responses
+                Some(update) = response_rx.recv() => {
+                    if let Ok(json) = serde_json::to_string(&update) {
+                        if sender.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }
     });
     
-    // Handle incoming messages (for future commands)
+    // Handle incoming messages and process requests
+    let recv_state = state.clone();
     let recv_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Close(_)) => break,
-                Ok(Message::Ping(data)) => {
+                Ok(Message::Ping(_)) => {
                     // Pong is handled automatically by axum
                 }
                 Ok(Message::Text(text)) => {
-                    // Could handle commands here in the future
-                    info!("[WS] Received text: {}", text);
+                    debug!("[WS] Received: {}", text);
+                    
+                    // Try to parse as a request
+                    if let Ok(request) = serde_json::from_str::<WebSocketRequest>(&text) {
+                        if let Some(response) = handle_request(request, &recv_state).await {
+                            let _ = response_tx.send(response).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!("[WS] Error receiving message: {}", e);
@@ -156,6 +256,109 @@ async fn handle_socket(socket: WebSocket, state: WebState) {
     
     heartbeat_handle.abort();
     info!("[WS] Client disconnected");
+}
+
+/// Handle incoming WebSocket requests
+async fn handle_request(request: WebSocketRequest, state: &WebState) -> Option<WebSocketUpdate> {
+    match request {
+        WebSocketRequest::Ping => {
+            Some(WebSocketUpdate::Pong {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            })
+        }
+        WebSocketRequest::GetHealth => {
+            Some(WebSocketUpdate::Health(build_health_response(state)))
+        }
+        WebSocketRequest::GetPositions => {
+            let tracker = state.position_tracker.read().await;
+            let positions: Vec<PositionResponse> = tracker
+                .open_positions()
+                .iter()
+                .map(|p| (*p).into())
+                .collect();
+            let total = positions.len();
+            Some(WebSocketUpdate::Positions(PositionsListResponse { positions, total }))
+        }
+        WebSocketRequest::GetSummary => {
+            let tracker = state.position_tracker.read().await;
+            let summary = tracker.summary();
+            Some(WebSocketUpdate::Summary(SummaryResponse {
+                total_cost_basis: summary.total_cost_basis,
+                total_guaranteed_profit: summary.total_guaranteed_profit,
+                total_unmatched_exposure: summary.total_unmatched_exposure,
+                realized_pnl: summary.realized_pnl,
+                open_positions: summary.open_positions,
+                resolved_positions: summary.resolved_positions,
+                total_contracts: summary.total_contracts,
+                daily_pnl: tracker.daily_pnl(),
+                all_time_pnl: tracker.all_time_pnl,
+            }))
+        }
+        WebSocketRequest::GetConfig => {
+            let dry_run = std::env::var("DRY_RUN")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(true);
+            
+            let web_port = std::env::var("WEB_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8080u16);
+            
+            let cred_status = &state.credential_status;
+            
+            let config = ConfigResponse {
+                dry_run,
+                arb_threshold: ARB_THRESHOLD,
+                enabled_leagues: ENABLED_LEAGUES.iter().map(|s| s.to_string()).collect(),
+                market_count: state.global_state.market_count(),
+                web_port,
+                credentials: CredentialStatusResponse {
+                    kalshi_configured: cred_status.kalshi_configured,
+                    kalshi_error: cred_status.kalshi_error.clone(),
+                    polymarket_configured: cred_status.polymarket_configured,
+                    polymarket_error: cred_status.polymarket_error.clone(),
+                },
+            };
+            Some(WebSocketUpdate::Config(config))
+        }
+        WebSocketRequest::GetCircuitBreaker => {
+            let status = state.circuit_breaker.status().await;
+            let cb_config = state.circuit_breaker.config();
+            Some(WebSocketUpdate::CircuitBreaker(CircuitBreakerResponse {
+                is_trading_allowed: !status.halted,
+                is_tripped: status.halted,
+                trip_reason: status.trip_reason.map(|r| r.to_string()),
+                daily_pnl_cents: (status.daily_pnl * 100.0) as i64,
+                total_contracts: status.total_position,
+                consecutive_errors: status.consecutive_errors,
+                config: CircuitBreakerConfigResponse {
+                    enabled: cb_config.enabled,
+                    max_position_per_market: cb_config.max_position_per_market,
+                    max_total_position: cb_config.max_total_position,
+                    max_daily_loss_cents: (cb_config.max_daily_loss * 100.0) as i64,
+                    max_consecutive_errors: cb_config.max_consecutive_errors,
+                    cooldown_secs: cb_config.cooldown_secs,
+                },
+            }))
+        }
+        WebSocketRequest::GetMarkets => {
+            // Markets are not stored in WebState, return empty for now
+            // The frontend will fetch via REST API
+            None
+        }
+    }
+}
+
+/// Build health response from state
+fn build_health_response(_state: &WebState) -> HealthResponse {
+    let uptime = get_start_time().elapsed().as_secs();
+    
+    HealthResponse {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: uptime,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
 }
 
 /// Watch positions.json for changes and broadcast updates

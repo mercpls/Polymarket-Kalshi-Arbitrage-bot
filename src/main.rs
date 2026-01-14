@@ -32,6 +32,7 @@ mod polymarket;
 mod polymarket_clob;
 mod position_tracker;
 mod types;
+mod web;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -188,6 +189,16 @@ async fn main() -> Result<()> {
     ));
 
     let exec_handle = tokio::spawn(run_execution_loop(exec_rx, engine));
+
+    // Start web dashboard server
+    let web_state = state.clone();
+    let web_cb = circuit_breaker.clone();
+    let web_tracker = position_tracker.clone();
+    tokio::spawn(async move {
+        if let Err(e) = web::start_server(web_state, web_cb, web_tracker).await {
+            error!("[WEB] Server failed: {}", e);
+        }
+    });
 
     // === TEST MODE: Synthetic arbitrage injection ===
     // TEST_ARB=1 to enable, TEST_ARB_TYPE=poly_yes_kalshi_no|kalshi_yes_poly_no|poly_only|kalshi_only

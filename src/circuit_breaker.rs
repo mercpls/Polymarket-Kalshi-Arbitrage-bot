@@ -162,6 +162,11 @@ impl CircuitBreaker {
         }
     }
     
+    /// Get the configuration
+    pub fn config(&self) -> &CircuitBreakerConfig {
+        &self.config
+    }
+    
     /// Check if trading is allowed
     #[allow(dead_code)]
     pub fn is_trading_allowed(&self) -> bool {

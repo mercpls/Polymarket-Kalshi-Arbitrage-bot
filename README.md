@@ -47,7 +47,20 @@ cargo build --release
 
 📖 **Detailed installation guide:** [Installation Guide](./doc/02-installation.md)
 
-### 2. Set Up Credentials
+### 2. Set Up Web Dashboard (Optional)
+
+To use the real-time web dashboard, you need to build the frontend once:
+
+```bash
+cd dashboard
+npm install
+npm run build
+cd ..
+```
+
+The dashboard will be automatically served at `http://localhost:8080` when you run the bot.
+
+### 3. Set Up Credentials
 
 Create a `.env` file:
 
@@ -67,7 +80,7 @@ RUST_LOG=info
 
 📖 **Complete credentials setup guide:** [Getting Your Credentials](./doc/03-credentials.md) | [Configuration Setup](./doc/04-configuration.md)
 
-### 3. Run
+### 4. Run
 
 ```bash
 # Dry run (paper trading)
@@ -302,6 +315,7 @@ cargo bench
 - ✅ Position & P&L tracking
 - ✅ Circuit breaker
 - ✅ Market discovery & caching
+- ✅ Real-time Web Dashboard (New!)
 - ✅ Beginner-friendly documentation and guides
 
 ### 🚧 Future Enhancements

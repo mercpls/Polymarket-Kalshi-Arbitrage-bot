@@ -14,6 +14,7 @@ use super::types::*;
 use super::WebState;
 use crate::config::{ARB_THRESHOLD, ENABLED_LEAGUES};
 use crate::types::{ArbType, kalshi_fee_cents, NO_PRICE};
+use crate::position_tracker::PositionTracker;
 
 // Track server start time for uptime calculation
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -313,6 +314,83 @@ cooldown_secs = {}
         Err(e) => {
             error!("[API] Failed to create config.ini: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Get debug positions from positions.json file
+pub async fn get_debug_positions() -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let positions_path = FilePath::new("positions.json");
+    
+    match std::fs::read_to_string(positions_path) {
+        Ok(contents) => {
+            match serde_json::from_str::<serde_json::Value>(&contents) {
+                Ok(data) => Ok(Json(data)),
+                Err(e) => {
+                    error!("[API] Failed to parse positions.json: {}", e);
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                        "error": format!("Failed to parse positions.json: {}", e)
+                    }))))
+                }
+            }
+        }
+        Err(e) => {
+            // File not found - return empty structure
+            info!("[API] positions.json not found: {}", e);
+            Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "error": "positions.json not found"
+            }))))
+        }
+    }
+}
+
+/// Save debug positions to positions.json file
+pub async fn save_debug_positions(
+    State(state): State<WebState>,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let positions_path = FilePath::new("positions.json");
+    
+    info!("[API] Attempting to save debug positions to {:?}", positions_path);
+    info!("[API] Data received: {}", serde_json::to_string(&data).unwrap_or_else(|_| "invalid".to_string()));
+    
+    // Pretty print the JSON
+    let json_str = match serde_json::to_string_pretty(&data) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("[API] Failed to serialize positions data: {}", e);
+            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": format!("Failed to serialize: {}", e)
+            }))));
+        }
+    };
+    
+    // Write to file
+    match std::fs::File::create(positions_path) {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(json_str.as_bytes()) {
+                error!("[API] Failed to write positions.json: {}", e);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    "error": format!("Failed to write file: {}", e)
+                }))));
+            }
+            
+            // Reload the position tracker to pick up changes
+            let mut tracker = state.position_tracker.write().await;
+            *tracker = PositionTracker::load();
+            
+            info!("[API] Debug positions saved to positions.json and reloaded");
+            Ok(Json(serde_json::json!({ 
+                "status": "ok", 
+                "message": "Positions saved and reloaded",
+                "path": "positions.json"
+            })))
+        }
+        Err(e) => {
+            error!("[API] Failed to create positions.json: {}", e);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "error": format!("Failed to create file: {}", e)
+            }))))
         }
     }
 }

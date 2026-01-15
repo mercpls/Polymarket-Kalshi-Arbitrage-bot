@@ -107,6 +107,8 @@ fn build_router(state: WebState, config: &WebConfig) -> Router {
         .route("/circuit-breaker/halt", post(api::halt_circuit_breaker))
         .route("/config", get(api::get_config))
         .route("/config", post(api::save_config))
+        .route("/debug/positions", get(api::get_debug_positions))
+        .route("/debug/positions", post(api::save_debug_positions))
         .with_state(state.clone());
     
     let ws_routes = Router::new()
